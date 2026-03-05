@@ -19,6 +19,3 @@
 [submodule "lib/account-abstraction"]
 	path = lib/account-abstraction
 	url = https://github.com/eth-infinitism/account-abstraction.git
-[submodule "intuition-contracts-v2-periphery"]
-	path = intuition-contracts-v2-periphery
-	url = https://github.com/0xIntuition/intuition-contracts-v2-periphery.git

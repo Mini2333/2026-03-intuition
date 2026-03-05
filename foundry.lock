@@ -1,7 +1,4 @@
 {
-  "intuition-contracts-v2-periphery": {
-    "rev": "b026521fe26db8249cd0795b62ec480fd8c848e8"
-  },
   "lib/account-abstraction": {
     "rev": "cc3893bcaf2272c163ce89d5eb9eadb8e6b52db7"
   },
