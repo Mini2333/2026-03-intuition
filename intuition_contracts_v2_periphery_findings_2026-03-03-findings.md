@@ -28,6 +28,12 @@ The router quotes/uses a bridge fee derived from `minTrustOut` but bridges `amou
 
 A caller can underpay bridge fees by choosing an artificially low `minTrustOut` while still producing and bridging a much larger `amountOut`. If the bridge hub validates fee sufficiency, transactions can revert after the swap, causing unreliable behavior and potential loss of gas or failed integrations. If fee sufficiency is not strictly enforced, the protocol/relayers may absorb costs or transfers may become delayed/stuck due to underfunding.
 
+## Triage Summary (Plain Language)
+
+- **Is this a real issue?** Yes. Fee quoting is tied to a user-provided minimum (`minTrustOut`) instead of the actual bridged amount (`amountOut`), so fee and bridged value can diverge.
+- **Should this be feared as a critical drain?** Usually not a direct vault-drain bug, but it is still important: it can cause failed swap+bridge transactions, broken UX/integrations, and potential relayer/protocol fee shortfalls.
+- **Can an attacker always get away with low fees?** Not always. If the bridge hub/relayer enforces required fees, the transaction should revert (attacker only wastes gas). If enforcement is weak or subsidized, underpayment can succeed and costs are externalized.
+
 ## Proof of Concept
 
 ```solidity
