@@ -87,11 +87,18 @@ contract MockMetaERC20HubAmountBased {
 }
 
 contract PoCPeriphery is Test {
+    address internal constant USDC_ADDRESS = 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913;
+    address internal constant TRUST_ADDRESS = 0x6cd905dF2Ed214b22e0d48FF17CD4200C1C6d8A3;
+    int24 internal constant SINGLE_HOP_TICK_SPACING = 100;
+    address internal constant MOCK_POOL = address(0xDEAD1);
+    uint256 internal constant USDC_AMOUNT_IN = 1e6;
+    uint256 internal constant ARTIFICIALLY_LOW_MIN_TRUST_OUT = 1e12;
+    uint256 internal constant OUTPUT_MULTIPLIER = 1e12;
+
     function test_submissionValidity() external {
         TrustSwapAndBridgeRouter router = new TrustSwapAndBridgeRouter();
 
         address user = makeAddr("user");
-        int24 tickSpacing = 100;
 
         MockERC20 usdcTemplate = new MockERC20();
         MockERC20 trustTemplate = new MockERC20();
@@ -99,39 +106,41 @@ contract PoCPeriphery is Test {
         MockCLFactory clFactoryTemplate = new MockCLFactory();
         MockMetaERC20HubAmountBased amountBasedHubTemplate = new MockMetaERC20HubAmountBased();
 
-        vm.etch(0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913, address(usdcTemplate).code);
-        vm.etch(0x6cd905dF2Ed214b22e0d48FF17CD4200C1C6d8A3, address(trustTemplate).code);
+        vm.etch(USDC_ADDRESS, address(usdcTemplate).code);
+        vm.etch(TRUST_ADDRESS, address(trustTemplate).code);
         vm.etch(router.slipstreamSwapRouter(), address(swapRouterTemplate).code);
         vm.etch(address(router.slipstreamFactory()), address(clFactoryTemplate).code);
         vm.etch(address(router.metaERC20Hub()), address(amountBasedHubTemplate).code);
 
-        MockERC20 usdc = MockERC20(0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913);
-        MockERC20 trust = MockERC20(0x6cd905dF2Ed214b22e0d48FF17CD4200C1C6d8A3);
+        MockERC20 usdc = MockERC20(USDC_ADDRESS);
+        MockERC20 trust = MockERC20(TRUST_ADDRESS);
         MockCLFactory clFactory = MockCLFactory(address(router.slipstreamFactory()));
         MockMetaERC20HubAmountBased hub = MockMetaERC20HubAmountBased(address(router.metaERC20Hub()));
 
         usdc.initialize();
         trust.initialize();
-        clFactory.setPool(address(usdc), address(trust), tickSpacing, address(0xDEAD1));
+        clFactory.setPool(address(usdc), address(trust), SINGLE_HOP_TICK_SPACING, MOCK_POOL);
 
-        uint256 amountIn = 1e6;
-        uint256 minTrustOut = 1e12;
-        uint256 actualAmountOut = amountIn * 1e12;
-        uint256 lowFee = hub.quoteTransferRemote(router.recipientDomain(), bytes32(uint256(uint160(user))), minTrustOut);
+        uint256 actualAmountOut = USDC_AMOUNT_IN * OUTPUT_MULTIPLIER;
+        uint256 lowFee = hub.quoteTransferRemote(
+            router.recipientDomain(), bytes32(uint256(uint160(user))), ARTIFICIALLY_LOW_MIN_TRUST_OUT
+        );
         uint256 requiredFee = hub.quoteTransferRemote(
             router.recipientDomain(), bytes32(uint256(uint160(user))), actualAmountOut
         );
         assertLt(lowFee, requiredFee);
 
-        usdc.mint(user, amountIn);
+        usdc.mint(user, USDC_AMOUNT_IN);
         vm.prank(user);
         usdc.approve(address(router), type(uint256).max);
         vm.deal(user, lowFee);
 
-        bytes memory path = abi.encodePacked(address(usdc), tickSpacing, address(trust));
+        bytes memory path = abi.encodePacked(address(usdc), SINGLE_HOP_TICK_SPACING, address(trust));
         vm.prank(user);
         vm.expectRevert(bytes("insufficient fee"));
-        router.swapAndBridgeWithERC20{ value: lowFee }(address(usdc), amountIn, path, minTrustOut, user);
+        router.swapAndBridgeWithERC20{ value: lowFee }(
+            address(usdc), USDC_AMOUNT_IN, path, ARTIFICIALLY_LOW_MIN_TRUST_OUT, user
+        );
 
         assertEq(hub.transferCounter(), 0);
     }
