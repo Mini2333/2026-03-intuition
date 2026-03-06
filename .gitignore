@@ -25,3 +25,5 @@ broadcast/*/31337/
 .claude/settings.local.json
 CLAUDE.md
 
+out/
+cache/
