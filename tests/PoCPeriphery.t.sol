@@ -134,7 +134,7 @@ contract PoCMockCLFactory {
  */
 contract PoCMockMetaERC20HubAmountDependent {
     uint256 public constant BASE_FEE = 1000 wei;
-    uint256 public constant FEE_BPS = 10; // 0.1% fee on the transfer amount (10 basis points)
+    uint256 public constant FEE_BPS = 10; // 10 basis points = 0.1% of the transfer amount
     uint256 public transferCounter;
 
     /// @dev Quotes the fee for a given transfer amount (amount-dependent).
