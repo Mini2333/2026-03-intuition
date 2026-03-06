@@ -161,6 +161,40 @@ contract PoCMockMetaERC20HubAmountDependent {
     }
 }
 
+/**
+ * @dev MetaERC20Hub mock that does NOT consume the TRUST token allowance.
+ *      This simulates a bridge implementation that uses an internal mechanism
+ *      (e.g., token lock/burn without transferFrom) to handle source tokens.
+ *      The key behavior: it does NOT call trustToken.transferFrom(), so the
+ *      allowance set by safeIncreaseAllowance remains after each call.
+ */
+contract PoCMockMetaERC20HubNoAllowanceConsumption {
+    uint256 public constant FLAT_FEE = 1000 wei;
+    uint256 public transferCounter;
+
+    function quoteTransferRemote(uint32, bytes32, uint256) external pure returns (uint256) {
+        return FLAT_FEE;
+    }
+
+    /// @dev Accepts the ETH fee and returns a transferId, but does NOT call
+    ///      transferFrom on the TRUST token. This leaves the allowance intact.
+    function transferRemote(
+        uint32,
+        bytes32,
+        uint256,
+        uint256,
+        FinalityState
+    )
+        external
+        payable
+        returns (bytes32 transferId)
+    {
+        require(msg.value >= FLAT_FEE, "insufficient fee");
+        transferCounter++;
+        transferId = keccak256(abi.encodePacked(transferCounter, block.timestamp, msg.sender));
+    }
+}
+
 /* =================================================== */
 /*                     PROOF TESTS                     */
 /* =================================================== */
@@ -406,5 +440,252 @@ contract PoCPeriphery is Test {
         assertEq(usdcToken.balanceOf(attacker), attackerUsdcBefore, "Attacker USDC unchanged");
         assertEq(attacker.balance, attackerEthBefore, "Attacker ETH unchanged");
         assertEq(metaERC20Hub.transferCounter(), bridgeTransfersBefore, "No bridge transfers occurred");
+    }
+}
+
+/* ================================================================= */
+/*  NEW VULNERABILITY: safeIncreaseAllowance residual allowance      */
+/* ================================================================= */
+
+/**
+ * @title PoCPeripheryAllowance
+ * @notice Proves that TrustSwapAndBridgeRouter's use of `safeIncreaseAllowance`
+ *         (instead of `forceApprove`) creates a residual allowance vulnerability.
+ *
+ * The vulnerability:
+ *   1. TrustSwapAndBridgeRouter uses `safeIncreaseAllowance` (lines 103, 157, 284)
+ *      to grant token allowances to the swap router and MetaERC20Hub bridge.
+ *   2. `safeIncreaseAllowance` ADDS to the current allowance rather than replacing it.
+ *   3. If the external contract (swap router or bridge) does not consume the full
+ *      approved amount via `transferFrom`, the residual allowance persists.
+ *   4. On the next call, `safeIncreaseAllowance` adds to the residual, causing the
+ *      allowance to grow unboundedly over time.
+ *   5. This accumulated allowance could allow the external contract to drain tokens
+ *      from the router if it ever receives tokens (e.g., via accidental transfer,
+ *      or during a multi-step operation).
+ *
+ * The fix: Replace `safeIncreaseAllowance` with `forceApprove`, which always resets
+ * the allowance to the exact intended value.
+ */
+contract PoCPeripheryAllowance is Test {
+    TrustSwapAndBridgeRouter public router;
+    PoCMockMetaERC20HubNoAllowanceConsumption public metaERC20Hub;
+    PoCMockSwapRouter public swapRouter;
+    PoCMockCLFactory public clFactory;
+
+    PoCMockERC20 public usdcToken;
+    PoCMockERC20 public trustToken;
+
+    address public user = makeAddr("user");
+    address public recipient = makeAddr("recipient");
+
+    address public constant BASE_MAINNET_USDC = 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913;
+    address public constant BASE_MAINNET_TRUST = 0x6cd905dF2Ed214b22e0d48FF17CD4200C1C6d8A3;
+    address payable public constant BASE_MAINNET_WETH = payable(0x4200000000000000000000000000000000000006);
+
+    int24 public constant TICK_SPACING_100 = 100;
+    uint256 public constant OUTPUT_MULTIPLIER = 1e12;
+    address public constant MOCK_POOL = address(0xDEAD1);
+
+    function setUp() public {
+        // Deploy mock templates and etch them at mainnet addresses
+        PoCMockERC20 usdcTemplate = new PoCMockERC20("", "", 0);
+        PoCMockERC20 trustTemplate = new PoCMockERC20("", "", 0);
+        PoCMockWETH wethTemplate = new PoCMockWETH();
+
+        vm.etch(BASE_MAINNET_USDC, address(usdcTemplate).code);
+        vm.etch(BASE_MAINNET_TRUST, address(trustTemplate).code);
+        vm.etch(BASE_MAINNET_WETH, address(wethTemplate).code);
+
+        usdcToken = PoCMockERC20(BASE_MAINNET_USDC);
+        trustToken = PoCMockERC20(BASE_MAINNET_TRUST);
+
+        usdcToken.initialize("USD Coin", "USDC", 6);
+        trustToken.initialize("Trust Token", "TRUST", 18);
+        PoCMockWETH(BASE_MAINNET_WETH).initialize("Wrapped Ether", "WETH", 18);
+
+        // Deploy mock infrastructure — use the NO-ALLOWANCE-CONSUMPTION hub
+        PoCMockSwapRouter swapRouterTemplate = new PoCMockSwapRouter();
+        PoCMockCLFactory clFactoryTemplate = new PoCMockCLFactory();
+        PoCMockMetaERC20HubNoAllowanceConsumption metaERC20HubTemplate =
+            new PoCMockMetaERC20HubNoAllowanceConsumption();
+
+        // Deploy the real router
+        router = new TrustSwapAndBridgeRouter();
+
+        // Etch mocks at the hardcoded addresses the router expects
+        vm.etch(router.slipstreamSwapRouter(), address(swapRouterTemplate).code);
+        vm.etch(address(router.slipstreamFactory()), address(clFactoryTemplate).code);
+        vm.etch(address(router.metaERC20Hub()), address(metaERC20HubTemplate).code);
+
+        swapRouter = PoCMockSwapRouter(router.slipstreamSwapRouter());
+        clFactory = PoCMockCLFactory(address(router.slipstreamFactory()));
+        metaERC20Hub = PoCMockMetaERC20HubNoAllowanceConsumption(address(router.metaERC20Hub()));
+
+        // Configure pools
+        swapRouter.setOutputMultiplier(OUTPUT_MULTIPLIER);
+        clFactory.setPool(BASE_MAINNET_USDC, BASE_MAINNET_TRUST, TICK_SPACING_100, MOCK_POOL);
+        clFactory.setPool(BASE_MAINNET_WETH, BASE_MAINNET_TRUST, TICK_SPACING_100, MOCK_POOL);
+
+        // Fund the user
+        usdcToken.mint(user, 10_000_000e6);
+        vm.prank(user);
+        usdcToken.approve(address(router), type(uint256).max);
+    }
+
+    function _buildPath(address tokenIn, int24 tickSpacing, address tokenOut) internal pure returns (bytes memory) {
+        return abi.encodePacked(tokenIn, tickSpacing, tokenOut);
+    }
+
+    /**
+     * @notice After the fix (forceApprove), the TRUST allowance to the bridge
+     *         is always reset to exactly the current call's amount, NOT accumulated.
+     *
+     *         Before fix: allowance = N * trustAmount after N calls (accumulation)
+     *         After fix:  allowance = trustAmount after any number of calls (no accumulation)
+     */
+    function test_submissionValidity() external {
+        uint256 trustAmount = 1000e18;
+        uint256 fee = metaERC20Hub.quoteTransferRemote(0, bytes32(0), trustAmount);
+
+        // Mint TRUST to the user and approve the router
+        trustToken.mint(user, trustAmount * 3);
+        vm.startPrank(user);
+        trustToken.approve(address(router), type(uint256).max);
+
+        // Check initial allowance from router to bridge
+        uint256 allowanceBefore = trustToken.allowance(address(router), address(metaERC20Hub));
+        assertEq(allowanceBefore, 0, "Initial allowance should be 0");
+
+        // --- First bridgeTrust call ---
+        vm.deal(user, fee);
+        router.bridgeTrust{ value: fee }(trustAmount, recipient);
+
+        uint256 allowanceAfterFirst = trustToken.allowance(address(router), address(metaERC20Hub));
+        console2.log("Allowance after 1st bridge call:", allowanceAfterFirst);
+
+        // Since the mock bridge does NOT consume allowance, the full amount remains
+        assertEq(
+            allowanceAfterFirst,
+            trustAmount,
+            "After 1st call: bridge has trustAmount allowance"
+        );
+
+        // --- Second bridgeTrust call ---
+        vm.deal(user, fee);
+        router.bridgeTrust{ value: fee }(trustAmount, recipient);
+
+        uint256 allowanceAfterSecond = trustToken.allowance(address(router), address(metaERC20Hub));
+        console2.log("Allowance after 2nd bridge call:", allowanceAfterSecond);
+
+        // FIXED: forceApprove resets the allowance, so it stays at trustAmount (not 2x)
+        assertEq(
+            allowanceAfterSecond,
+            trustAmount,
+            "FIXED: After 2nd call, allowance is RESET to trustAmount (not accumulated to 2x)"
+        );
+
+        // --- Third bridgeTrust call ---
+        vm.deal(user, fee);
+        router.bridgeTrust{ value: fee }(trustAmount, recipient);
+
+        uint256 allowanceAfterThird = trustToken.allowance(address(router), address(metaERC20Hub));
+        console2.log("Allowance after 3rd bridge call:", allowanceAfterThird);
+
+        // FIXED: Still trustAmount, not 3x
+        assertEq(
+            allowanceAfterThird,
+            trustAmount,
+            "FIXED: After 3rd call, allowance is RESET to trustAmount (not accumulated to 3x)"
+        );
+
+        vm.stopPrank();
+
+        // With forceApprove, the bridge's allowance is bounded to a single call's worth
+        assertTrue(
+            allowanceAfterThird == trustAmount,
+            "forceApprove bounds the allowance to a single call's authorization"
+        );
+    }
+
+    /**
+     * @notice Verifies the fix works for `swapAndBridgeWithERC20` too.
+     */
+    function test_swapAndBridgeAllowanceFixed() external {
+        uint256 amountIn = 1_000e6;
+        uint256 expectedOut = amountIn * OUTPUT_MULTIPLIER;
+        uint256 fee = metaERC20Hub.quoteTransferRemote(0, bytes32(0), expectedOut);
+        bytes memory path = _buildPath(BASE_MAINNET_USDC, TICK_SPACING_100, BASE_MAINNET_TRUST);
+
+        vm.startPrank(user);
+
+        // First swap-and-bridge
+        vm.deal(user, fee);
+        router.swapAndBridgeWithERC20{ value: fee }(BASE_MAINNET_USDC, amountIn, path, expectedOut, recipient);
+
+        uint256 allowanceAfterFirst = trustToken.allowance(address(router), address(metaERC20Hub));
+        assertEq(allowanceAfterFirst, expectedOut, "1st call: bridge has full allowance (unconsumed)");
+
+        // Second swap-and-bridge
+        vm.deal(user, fee);
+        router.swapAndBridgeWithERC20{ value: fee }(BASE_MAINNET_USDC, amountIn, path, expectedOut, recipient);
+
+        uint256 allowanceAfterSecond = trustToken.allowance(address(router), address(metaERC20Hub));
+        // FIXED: allowance is reset, not doubled
+        assertEq(
+            allowanceAfterSecond,
+            expectedOut,
+            "FIXED: After 2nd call, allowance is RESET (not doubled)"
+        );
+
+        vm.stopPrank();
+
+        console2.log("Bridge allowance after 2 swapAndBridge calls:", allowanceAfterSecond);
+        console2.log("Expected per call:", expectedOut);
+        console2.log("FIXED: No accumulation");
+    }
+
+    /**
+     * @notice Verifies the fix works for `swapAndBridgeWithETH` too.
+     */
+    function test_swapAndBridgeWithETH_allowanceFixed() external {
+        uint256 swapEth = 1 ether;
+        uint256 expectedOut = swapEth * OUTPUT_MULTIPLIER;
+        uint256 fee = metaERC20Hub.quoteTransferRemote(0, bytes32(0), expectedOut);
+        bytes memory path = _buildPath(BASE_MAINNET_WETH, TICK_SPACING_100, BASE_MAINNET_TRUST);
+
+        vm.startPrank(user);
+
+        // First swap-and-bridge with ETH
+        uint256 totalEth = swapEth + fee;
+        vm.deal(user, totalEth);
+        router.swapAndBridgeWithETH{ value: totalEth }(path, expectedOut, recipient);
+
+        // WETH allowance to swap router should be 0 (consumed by exactInput)
+        uint256 wethAllowanceToSwapRouter = IERC20(BASE_MAINNET_WETH).allowance(
+            address(router), router.slipstreamSwapRouter()
+        );
+        assertEq(wethAllowanceToSwapRouter, 0, "WETH allowance consumed by swap router");
+
+        // TRUST allowance to bridge remains (bridge doesn't consume)
+        uint256 trustAllowanceToBridge = trustToken.allowance(address(router), address(metaERC20Hub));
+        assertEq(trustAllowanceToBridge, expectedOut, "TRUST allowance from first call");
+
+        // Second swap-and-bridge with ETH
+        vm.deal(user, totalEth);
+        router.swapAndBridgeWithETH{ value: totalEth }(path, expectedOut, recipient);
+
+        uint256 trustAllowanceAfterSecond = trustToken.allowance(address(router), address(metaERC20Hub));
+        // FIXED: allowance is reset, not accumulated
+        assertEq(
+            trustAllowanceAfterSecond,
+            expectedOut,
+            "FIXED: TRUST allowance RESET after 2nd ETH bridge call (not accumulated)"
+        );
+
+        vm.stopPrank();
+
+        console2.log("TRUST allowance to bridge after 2 ETH swaps:", trustAllowanceAfterSecond);
+        console2.log("FIXED: Not accumulated");
     }
 }
