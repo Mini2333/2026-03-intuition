@@ -590,7 +590,7 @@ contract PoCPeripheryAllowance is Test {
         router.bridgeTrust{ value: fee }(trustAmount, recipient);
 
         uint256 allowanceAfterThird = trustToken.allowance(address(router), address(metaERC20Hub));
-        console2.log("Allowance after 3rd bridge call:", allowanceAfterThird);
+         console2.log("Allowance after 3rd bridge call:", allowanceAfterThird);
 
         // FIXED: Still trustAmount, not 3x
         assertEq(
@@ -600,12 +600,6 @@ contract PoCPeripheryAllowance is Test {
         );
 
         vm.stopPrank();
-
-        // With forceApprove, the bridge's allowance is bounded to a single call's worth
-        assertTrue(
-            allowanceAfterThird == trustAmount,
-            "forceApprove bounds the allowance to a single call's authorization"
-        );
     }
 
     /**
